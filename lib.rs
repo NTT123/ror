@@ -7,7 +7,7 @@ use ror_sys::ffi::OrtSessionOptions;
 use ror_sys::ffi::ORT_API_VERSION;
 use std::ffi::CString;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct ROR {
     api: *const OrtApi,
