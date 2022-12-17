@@ -77,6 +77,6 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let _ror = ROR::new("candy.onnx");
+        let _ror = ROR::new("models/mnist.onnx");
     }
 }

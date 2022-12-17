@@ -13,3 +13,7 @@ path = "lib.rs"
 
 [dependencies]
 ror-sys = {path = "ror-sys"}
+
+
+[[example]]
+name = "basic"

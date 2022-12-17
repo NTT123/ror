@@ -26,8 +26,6 @@ jobs:
           mkdir -p /opt
           tar xzf /tmp/onnx.tgz -C /opt
         shell: bash
-      - name: Download example onnx file
-        run: wget https://raw.githubusercontent.com/microsoft/Windows-Machine-Learning/master/Samples/FNSCandyStyleTransfer/UWP/cs/Assets/candy.onnx
       - name: Cargo test
         run: LD_LIBRARY_PATH=/opt/onnxruntime-linux-x64-1.13.1/lib cargo test
         shell: bash
