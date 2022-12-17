@@ -20,8 +20,17 @@ jobs:
       - name: Install Rust (rustup)
         run: rustup update ${{ matrix.rust }} --no-self-update && rustup default ${{ matrix.rust }}
         shell: bash
-      - run: cargo test
-
+      - name: Download onnxruntime
+        run: |
+          wget https://github.com/microsoft/onnxruntime/releases/download/v1.13.1/onnxruntime-linux-x64-1.13.1.tgz -O /tmp/onnx.tgz
+          mkdir -p /opt
+          tar xzf /tmp/onnx.tgz -C /opt
+        shell: bash
+      - name: Download example onnx file
+        run: wget https://raw.githubusercontent.com/microsoft/Windows-Machine-Learning/master/Samples/FNSCandyStyleTransfer/UWP/cs/Assets/candy.onnx
+      - name: Cargo test
+        run: LD_LIBRARY_PATH=/opt/onnxruntime-linux-x64-1.13.1/lib cargo test
+        shell: bash
   rustfmt:
     name: Rustfmt
     runs-on: ubuntu-latest
