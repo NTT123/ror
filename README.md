@@ -9,7 +9,7 @@ You have to install onnxruntime library on your system:
 
 ```
 wget https://github.com/microsoft/onnxruntime/releases/download/v1.13.1/onnxruntime-linux-x64-1.13.1.tgz -O /tmp/onnx.tgz
-mkdir -p opt
+mkdir -p /opt
 tar xzf /tmp/onnx.tgz -C /opt
 ```
 
