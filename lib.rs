@@ -21,24 +21,64 @@ pub struct ROR {
     session: *const OrtSession,
 }
 
-pub struct Tensor<T> {
-    name: String,
-    data: Vec<T>,
-    shape: Vec<i64>,
+pub enum TensorData {
+    FloatData(Vec<f32>),
+    LongData(Vec<i32>),
 }
 
-impl<T: Clone> Tensor<T> {
-    pub fn new(name: &str, data: &[T], shape: &[i64]) -> Self {
-        Tensor::<T> {
-            name: String::from(name),
-            data: Vec::from(data),
-            shape: Vec::from(shape),
+pub use TensorData::FloatData;
+pub use TensorData::LongData;
+
+impl TensorData {
+    pub fn into_f32_slice(&self) -> Option<&[f32]> {
+        match self {
+            FloatData(v) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
+
+    pub fn into_i32_slice(&self) -> Option<&[i32]> {
+        match self {
+            LongData(v) => Some(v.as_slice()),
+            _ => None,
         }
     }
 }
 
-pub struct InferenceOutput<T> {
-    pub data: Vec<T>,
+pub struct NamedTensor {
+    name: String,
+    data: TensorData,
+    shape: Vec<i64>,
+    mem_size: usize,
+    dtype: ONNXTensorElementDataType,
+}
+
+impl NamedTensor {
+    pub fn from_f32_slice(name: &str, data: &[f32], shape: &[i64]) -> Self {
+        let mem_size: usize = (shape.iter().product::<i64>() as usize) * std::mem::size_of::<f32>();
+        NamedTensor {
+            name: String::from(name),
+            data: FloatData(Vec::from(data)),
+            shape: Vec::from(shape),
+            mem_size,
+            dtype: ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+        }
+    }
+
+    pub fn from_i32_slice(name: &str, data: &[i32], shape: &[i64]) -> Self {
+        let mem_size: usize = (shape.iter().product::<i64>() as usize) * std::mem::size_of::<i32>();
+        NamedTensor {
+            name: String::from(name),
+            data: LongData(Vec::from(data)),
+            shape: Vec::from(shape),
+            mem_size,
+            dtype: ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
+        }
+    }
+}
+
+pub struct InferenceOutput {
+    pub data: TensorData,
     pub shape: Vec<i64>,
 }
 
@@ -68,17 +108,21 @@ impl ROR {
         Ok(env)
     }
 
-    fn tensor_to_ort_value<T>(self, tensor: &Tensor<T>) -> *const OrtValue {
+    fn tensor_to_ort_value(self, tensor: &NamedTensor) -> *const OrtValue {
         let mem_info = self.create_cpu_memory_info();
+        let data_ptr = match &tensor.data {
+            FloatData(d) => d.as_ptr() as *mut c_void,
+            LongData(d) => d.as_ptr() as *mut c_void,
+        };
         let mut ort_value: *mut OrtValue = std::ptr::null_mut();
         unsafe {
             (*self.api).CreateTensorWithDataAsOrtValue.unwrap()(
                 mem_info,
-                tensor.data.as_ptr() as *mut c_void,
-                tensor.data.len() * std::mem::size_of::<T>(),
+                data_ptr,
+                tensor.mem_size,
                 tensor.shape.as_ptr(),
                 tensor.shape.len(),
-                ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+                tensor.dtype,
                 &mut ort_value,
             );
             if ort_value.is_null() {
@@ -112,11 +156,21 @@ impl ROR {
         }
     }
 
-    pub fn get_value_shape(self, value: *const OrtValue) -> Vec<i64> {
+    fn get_value_shape_and_dtype(
+        self,
+        value: *const OrtValue,
+    ) -> (Vec<i64>, ONNXTensorElementDataType) {
         let mut type_and_shape_info: *mut OrtTensorTypeAndShapeInfo = std::ptr::null_mut();
         let type_and_shape_info = unsafe {
             (*self.api).GetTensorTypeAndShape.unwrap()(value, &mut type_and_shape_info);
             type_and_shape_info
+        };
+
+        let dtype = unsafe {
+            let mut dtype: ONNXTensorElementDataType =
+                ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+            (*self.api).GetTensorElementType.unwrap()(type_and_shape_info, &mut dtype);
+            dtype
         };
 
         let num_dim = unsafe {
@@ -129,7 +183,7 @@ impl ROR {
             (*self.api).GetDimensions.unwrap()(type_and_shape_info, _dims.as_mut_ptr(), num_dim);
             _dims
         };
-        dims
+        (dims, dtype)
     }
 
     fn get_error_message(self, status: *const OrtStatus) -> Result<String> {
@@ -144,9 +198,9 @@ impl ROR {
 
     pub fn run(
         self,
-        inputs: Vec<Tensor<f32>>,
+        inputs: Vec<NamedTensor>,
         output_names: &[String],
-    ) -> Result<Vec<InferenceOutput<f32>>> {
+    ) -> Result<Vec<InferenceOutput>> {
         let input_names: Vec<CString> = inputs
             .iter()
             .map(|x| CString::new(x.name.as_str()).unwrap())
@@ -179,17 +233,30 @@ impl ROR {
             output_values
         };
 
-        let outputs: Vec<InferenceOutput<f32>> = output_values
+        let outputs: Vec<InferenceOutput> = output_values
             .iter()
             .map(|&e| {
-                let data = self.get_tensor_mutable_data(e) as *const f32;
-                let shape = self.get_value_shape(e);
+                let (shape, dtype) = self.get_value_shape_and_dtype(e);
                 let size: i64 = shape.iter().product();
-                let data = unsafe { std::slice::from_raw_parts(data, size as usize) };
-                InferenceOutput {
-                    data: data.to_vec(),
-                    shape,
-                }
+                let data = match dtype {
+                    ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 => {
+                        let data = self.get_tensor_mutable_data(e) as *const i32;
+                        let data =
+                            unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec();
+                        LongData(data)
+                    }
+                    ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT => {
+                        let data = self.get_tensor_mutable_data(e) as *const f32;
+                        let data =
+                            unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec();
+                        FloatData(data)
+                    }
+                    _ => {
+                        panic!("Not supported data type!");
+                    }
+                };
+
+                InferenceOutput { data, shape }
             })
             .collect();
 
@@ -245,7 +312,7 @@ mod tests {
         for _ in 1..10 {
             let o = ror
                 .run(
-                    vec![Tensor::<f32>::new("Input3", &inp.to_vec(), &shape)],
+                    vec![NamedTensor::from_f32_slice("Input3", &inp, &shape)],
                     &output_names,
                 )
                 .unwrap();
