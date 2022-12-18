@@ -54,8 +54,20 @@ pub struct NamedTensor {
 }
 
 impl NamedTensor {
+    fn assert_correct_shape<T>(data: &[T], shape: &[i64]) {
+        let num_elem = shape.iter().product::<i64>() as usize;
+        if num_elem != data.len() {
+            panic!(
+                "Buffer size ({}) does not match with shape ({:?})!",
+                num_elem, shape,
+            );
+        }
+    }
+
     pub fn from_f32_slice(name: &str, data: &[f32], shape: &[i64]) -> Self {
-        let mem_size: usize = (shape.iter().product::<i64>() as usize) * std::mem::size_of::<f32>();
+        Self::assert_correct_shape(data, shape);
+        let num_elem = shape.iter().product::<i64>() as usize;
+        let mem_size: usize = num_elem * std::mem::size_of::<f32>();
         NamedTensor {
             name: String::from(name),
             data: FloatData(Vec::from(data)),
@@ -66,7 +78,9 @@ impl NamedTensor {
     }
 
     pub fn from_i32_slice(name: &str, data: &[i32], shape: &[i64]) -> Self {
-        let mem_size: usize = (shape.iter().product::<i64>() as usize) * std::mem::size_of::<i32>();
+        Self::assert_correct_shape(data, shape);
+        let num_elem = shape.iter().product::<i64>() as usize;
+        let mem_size: usize = num_elem * std::mem::size_of::<i32>();
         NamedTensor {
             name: String::from(name),
             data: LongData(Vec::from(data)),
