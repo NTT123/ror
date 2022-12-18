@@ -8,14 +8,12 @@ use ror_sys::ffi::OrtApi;
 use ror_sys::ffi::OrtEnv;
 use ror_sys::ffi::OrtLoggingLevel;
 use ror_sys::ffi::OrtMemType;
-use ror_sys::ffi::OrtRunOptions;
 use ror_sys::ffi::OrtSessionOptions;
 use ror_sys::ffi::OrtStatus;
 use ror_sys::ffi::OrtTensorTypeAndShapeInfo;
 use ror_sys::ffi::ORT_API_VERSION;
 use ror_sys::ffi::{OrtMemoryInfo, OrtSession, OrtValue};
-use std::ffi::c_void;
-use std::ffi::CString;
+use std::ffi::{c_void, CString};
 
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -180,7 +178,7 @@ impl ROR {
                 output_names.iter().map(|&_| std::ptr::null_mut()).collect();
             let status = (*self.api).Run.expect("Run err")(
                 self.session as *mut OrtSession,
-                0 as *const OrtRunOptions,
+                std::ptr::null(),
                 input_names_ptr.as_ptr(),
                 input_values.as_ptr(),
                 inputs.len(),
@@ -197,9 +195,6 @@ impl ROR {
         let outputs: Vec<InferenceOutput<f32>> = output_values
             .iter()
             .map(|&e| {
-                if e.is_null() {
-                    panic!("Null output error!");
-                }
                 let data = self.get_tensor_mutable_data(e) as *const f32;
                 let shape = self.get_value_shape(e);
                 let size: i64 = shape.iter().product();
