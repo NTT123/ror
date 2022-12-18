@@ -6,7 +6,7 @@ use ror_sys::ffi::ONNXTensorElementDataType;
 use ror_sys::ffi::OrtAllocatorType;
 use ror_sys::ffi::OrtApi;
 use ror_sys::ffi::OrtEnv;
-use ror_sys::ffi::OrtLoggingLevel;
+pub use ror_sys::ffi::OrtLoggingLevel;
 use ror_sys::ffi::OrtMemType;
 use ror_sys::ffi::OrtSessionOptions;
 use ror_sys::ffi::OrtStatus;
@@ -16,10 +16,8 @@ use ror_sys::ffi::{OrtMemoryInfo, OrtSession, OrtValue};
 use std::ffi::{c_void, CString};
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct ROR {
     api: *const OrtApi,
-    env: *const OrtEnv,
     session: *const OrtSession,
 }
 
@@ -39,10 +37,9 @@ impl<T: Clone> Tensor<T> {
     }
 }
 
-#[allow(dead_code)]
 pub struct InferenceOutput<T> {
-    data: Vec<T>,
-    shape: Vec<i64>,
+    pub data: Vec<T>,
+    pub shape: Vec<i64>,
 }
 
 impl ROR {
@@ -75,9 +72,7 @@ impl ROR {
         let mem_info = self.create_cpu_memory_info();
         let mut ort_value: *mut OrtValue = std::ptr::null_mut();
         unsafe {
-            (*self.api)
-                .CreateTensorWithDataAsOrtValue
-                .expect("CreateTensorWithDataAsOrtValue err")(
+            (*self.api).CreateTensorWithDataAsOrtValue.unwrap()(
                 mem_info,
                 tensor.data.as_ptr() as *mut c_void,
                 tensor.data.len() * std::mem::size_of::<T>(),
@@ -97,9 +92,7 @@ impl ROR {
         unsafe {
             let mut mem_info: *mut OrtMemoryInfo = std::ptr::null_mut();
 
-            (*self.api)
-                .CreateCpuMemoryInfo
-                .expect("CreateMemoryInfo err")(
+            (*self.api).CreateCpuMemoryInfo.unwrap()(
                 OrtAllocatorType::OrtArenaAllocator,
                 OrtMemType::OrtMemTypeDefault,
                 &mut mem_info,
@@ -114,9 +107,7 @@ impl ROR {
     fn get_tensor_mutable_data(self, x: *const OrtValue) -> *const c_void {
         unsafe {
             let mut output: *mut c_void = std::ptr::null_mut();
-            (*self.api)
-                .GetTensorMutableData
-                .expect("GetTensorMutableData err")(x as *mut OrtValue, &mut output);
+            (*self.api).GetTensorMutableData.unwrap()(x as *mut OrtValue, &mut output);
             output
         }
     }
@@ -124,7 +115,7 @@ impl ROR {
     pub fn get_value_shape(self, value: *const OrtValue) -> Vec<i64> {
         let mut type_and_shape_info: *mut OrtTensorTypeAndShapeInfo = std::ptr::null_mut();
         let type_and_shape_info = unsafe {
-            (*self.api).GetTensorTypeAndShape.expect("Err")(value, &mut type_and_shape_info);
+            (*self.api).GetTensorTypeAndShape.unwrap()(value, &mut type_and_shape_info);
             type_and_shape_info
         };
 
@@ -135,11 +126,7 @@ impl ROR {
         };
         let dims = unsafe {
             let mut _dims: Vec<i64> = vec![0; num_dim];
-            (*self.api).GetDimensions.expect("err")(
-                type_and_shape_info,
-                _dims.as_mut_ptr(),
-                num_dim,
-            );
+            (*self.api).GetDimensions.unwrap()(type_and_shape_info, _dims.as_mut_ptr(), num_dim);
             _dims
         };
         dims
@@ -176,7 +163,7 @@ impl ROR {
         let output_values = unsafe {
             let mut output_values: Vec<*mut OrtValue> =
                 output_names.iter().map(|&_| std::ptr::null_mut()).collect();
-            let status = (*self.api).Run.expect("Run err")(
+            let status = (*self.api).Run.unwrap()(
                 self.session as *mut OrtSession,
                 std::ptr::null(),
                 input_names_ptr.as_ptr(),
@@ -208,23 +195,19 @@ impl ROR {
 
         unsafe {
             input_values.iter().for_each(|&x| {
-                (*self.api).ReleaseValue.expect("ReleaseValue err")(x as *mut OrtValue);
+                (*self.api).ReleaseValue.unwrap()(x as *mut OrtValue);
             });
             output_values.iter().for_each(|&x| {
-                (*self.api).ReleaseValue.expect("ReleaseValue err")(x as *mut OrtValue);
+                (*self.api).ReleaseValue.unwrap()(x as *mut OrtValue);
             });
         }
 
         Ok(outputs)
     }
 
-    pub fn new(model_path: &str) -> Result<Self> {
+    pub fn new(model_path: &str, logging_level: OrtLoggingLevel) -> Result<Self> {
         let api = Self::get_api()?;
-        let env = Self::create_env(
-            api,
-            "rust-onnx-runtime",
-            OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE,
-        )?;
+        let env = Self::create_env(api, "rust-onnx-runtime", logging_level)?;
         let session_opts: *mut OrtSessionOptions = std::ptr::null_mut();
         let mut session: *mut OrtSession = std::ptr::null_mut();
         let model_path = CString::new(model_path).unwrap();
@@ -241,7 +224,7 @@ impl ROR {
             bail!("Cannot create ONNX session");
         };
 
-        Ok(ROR { api, env, session })
+        Ok(ROR { api, session })
     }
 }
 
@@ -251,7 +234,11 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let ror = ROR::new("models/mnist.onnx").unwrap();
+        let ror = ROR::new(
+            "models/mnist.onnx",
+            OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
+        )
+        .unwrap();
         let inp: [f32; 28 * 28] = [0f32; 28 * 28];
         let shape: Vec<i64> = vec![1, 1, 28, 28];
         let output_names: Vec<String> = vec![String::from("Plus214_Output_0")];
@@ -262,8 +249,6 @@ mod tests {
                     &output_names,
                 )
                 .unwrap();
-            println!("output {:?}", o[0].data);
-            println!("shape {:?}", o[0].shape);
             assert_eq!(o[0].shape, [1, 10]);
         }
     }
