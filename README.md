@@ -21,13 +21,6 @@ export LD_LIBRARY_PATH=/opt/onnxruntime-linux-x64-1.13.1/lib:$LD_LIBRARY_PATH
 
 ## Run tests
 
-To run test, you also need to download the example onnx file:
-
-```
-wget https://raw.githubusercontent.com/microsoft/Windows-Machine-Learning/master/Samples/FNSCandyStyleTransfer/UWP/cs/Assets/candy.onnx
-```
-
-
 ```
 cargo test
 ```
