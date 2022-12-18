@@ -9,7 +9,7 @@ fn main() -> Result<()> {
     let shape: Vec<i64> = vec![1, 1, 28, 28];
     let output_names: Vec<String> = vec![String::from("Plus214_Output_0")];
     let o = runner.run(
-        vec![NamedTensor::from_f32_slice("Input3", &inp, &shape)],
+        &[NamedTensor::from_f32_slice("Input3", &inp, &shape)],
         &output_names,
     )?;
 

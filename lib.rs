@@ -198,7 +198,7 @@ impl ROR {
 
     pub fn run(
         self,
-        inputs: Vec<NamedTensor>,
+        inputs: &[NamedTensor],
         output_names: &[String],
     ) -> Result<Vec<InferenceOutput>> {
         let input_names: Vec<CString> = inputs
@@ -312,7 +312,7 @@ mod tests {
         for _ in 1..10 {
             let o = ror
                 .run(
-                    vec![NamedTensor::from_f32_slice("Input3", &inp, &shape)],
+                    &[NamedTensor::from_f32_slice("Input3", &inp, &shape)],
                     &output_names,
                 )
                 .unwrap();
