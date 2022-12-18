@@ -15,10 +15,10 @@ fn main() {
                 .to_str()
                 .unwrap(),
         )
-        .allowlist_type("OrtApiBase")
+        .default_enum_style(bindgen::EnumVariation::Rust{non_exhaustive: false})
         .allowlist_var("ORT_API_VERSION")
-        .allowlist_var("OrtLoggingLevel_ORT_LOGGING_LEVEL_*")
         .allowlist_function("OrtGetApiBase")
+        .allowlist_function("GetTensorTypeAndShape")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks))
         .generate()
         .expect("Unable to generate bindings");

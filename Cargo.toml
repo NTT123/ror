@@ -12,6 +12,7 @@ path = "lib.rs"
 
 
 [dependencies]
+anyhow = "1.0.67"
 ror-sys = {path = "ror-sys"}
 
 
