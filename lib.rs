@@ -419,7 +419,7 @@ mod tests {
             .map(|(&x, &y)| (x - y).abs())
             .reduce(f32::max)
             .unwrap();
-        assert!(l1_dist < 1e-8);
+        assert!(l1_dist < 1e-7);
     }
 
     #[test]
@@ -464,7 +464,7 @@ mod tests {
                         .map(|(&x, &y)| (x - y).abs())
                         .reduce(f32::max)
                         .unwrap();
-                    assert!(l1_dist < 1e-8);
+                    assert!(l1_dist < 1e-7);
                 }
             });
             handles.push(handle);
