@@ -97,6 +97,104 @@ pub struct InferenceOutput {
 }
 
 impl ROR {
+    pub fn new(model_path: &str, logging_level: OrtLoggingLevel) -> Result<Self> {
+        let api = Self::get_api()?;
+        let env = Self::create_env(api, "rust-onnx-runtime", logging_level)?;
+        let session_opts: *mut OrtSessionOptions = std::ptr::null_mut();
+        let mut session: *mut OrtSession = std::ptr::null_mut();
+        let model_path = CString::new(model_path).unwrap();
+        let session = unsafe {
+            let _ = (*api).CreateSession.context("CreateSession err")?(
+                env,
+                model_path.as_ptr(),
+                session_opts,
+                &mut session,
+            );
+            session
+        };
+        if session.is_null() {
+            bail!("Cannot create ONNX session");
+        };
+
+        Ok(ROR { api, session })
+    }
+
+    pub fn run(
+        self,
+        inputs: &[NamedTensor],
+        output_names: &[&str],
+    ) -> Result<Vec<InferenceOutput>> {
+        let input_names: Vec<CString> = inputs
+            .iter()
+            .map(|x| CString::new(x.name.as_str()).unwrap())
+            .collect();
+        let input_names_ptr: Vec<*const i8> = input_names.iter().map(|x| x.as_ptr()).collect();
+        let c_output_names: Vec<CString> = output_names
+            .iter()
+            .map(|&x| CString::new(x).unwrap())
+            .collect();
+        let c_output_names_ptr: Vec<*const i8> =
+            c_output_names.iter().map(|x| x.as_ptr()).collect();
+        let input_values: Vec<*const OrtValue> =
+            inputs.iter().map(|x| self.tensor_to_ort_value(x)).collect();
+        let output_values = unsafe {
+            let mut output_values: Vec<*mut OrtValue> =
+                output_names.iter().map(|&_| std::ptr::null_mut()).collect();
+            let status = (*self.api).Run.unwrap()(
+                self.session as *mut OrtSession,
+                std::ptr::null(),
+                input_names_ptr.as_ptr(),
+                input_values.as_ptr(),
+                inputs.len(),
+                c_output_names_ptr.as_ptr(),
+                output_names.len(),
+                output_values.as_mut_ptr(),
+            );
+            if !status.is_null() {
+                bail!("{}", self.get_error_message(status).unwrap());
+            }
+            output_values
+        };
+
+        let outputs: Vec<InferenceOutput> = output_values
+            .iter()
+            .map(|&e| {
+                let (shape, dtype) = self.get_value_shape_and_dtype(e);
+                let size: i64 = shape.iter().product();
+                let data = match dtype {
+                    ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 => {
+                        let data = self.get_tensor_mutable_data(e) as *const i32;
+                        let data =
+                            unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec();
+                        LongData(data)
+                    }
+                    ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT => {
+                        let data = self.get_tensor_mutable_data(e) as *const f32;
+                        let data =
+                            unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec();
+                        FloatData(data)
+                    }
+                    _ => {
+                        panic!("Not supported data type!");
+                    }
+                };
+
+                InferenceOutput { data, shape }
+            })
+            .collect();
+
+        unsafe {
+            input_values.iter().for_each(|&x| {
+                (*self.api).ReleaseValue.unwrap()(x as *mut OrtValue);
+            });
+            output_values.iter().for_each(|&x| {
+                (*self.api).ReleaseValue.unwrap()(x as *mut OrtValue);
+            });
+        }
+
+        Ok(outputs)
+    }
+
     fn get_api() -> Result<*const OrtApi> {
         let ort_api_base = unsafe {
             ror_sys::ffi::OrtGetApiBase()
@@ -208,104 +306,6 @@ impl ROR {
             let msg = unsafe { std::ffi::CStr::from_ptr(msg).to_str() };
             msg.map(|e| e.to_string()).context("Utf8 error")
         }
-    }
-
-    pub fn run(
-        self,
-        inputs: &[NamedTensor],
-        output_names: &[&str],
-    ) -> Result<Vec<InferenceOutput>> {
-        let input_names: Vec<CString> = inputs
-            .iter()
-            .map(|x| CString::new(x.name.as_str()).unwrap())
-            .collect();
-        let input_names_ptr: Vec<*const i8> = input_names.iter().map(|x| x.as_ptr()).collect();
-        let c_output_names: Vec<CString> = output_names
-            .iter()
-            .map(|&x| CString::new(x).unwrap())
-            .collect();
-        let c_output_names_ptr: Vec<*const i8> =
-            c_output_names.iter().map(|x| x.as_ptr()).collect();
-        let input_values: Vec<*const OrtValue> =
-            inputs.iter().map(|x| self.tensor_to_ort_value(x)).collect();
-        let output_values = unsafe {
-            let mut output_values: Vec<*mut OrtValue> =
-                output_names.iter().map(|&_| std::ptr::null_mut()).collect();
-            let status = (*self.api).Run.unwrap()(
-                self.session as *mut OrtSession,
-                std::ptr::null(),
-                input_names_ptr.as_ptr(),
-                input_values.as_ptr(),
-                inputs.len(),
-                c_output_names_ptr.as_ptr(),
-                output_names.len(),
-                output_values.as_mut_ptr(),
-            );
-            if !status.is_null() {
-                bail!("{}", self.get_error_message(status).unwrap());
-            }
-            output_values
-        };
-
-        let outputs: Vec<InferenceOutput> = output_values
-            .iter()
-            .map(|&e| {
-                let (shape, dtype) = self.get_value_shape_and_dtype(e);
-                let size: i64 = shape.iter().product();
-                let data = match dtype {
-                    ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 => {
-                        let data = self.get_tensor_mutable_data(e) as *const i32;
-                        let data =
-                            unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec();
-                        LongData(data)
-                    }
-                    ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT => {
-                        let data = self.get_tensor_mutable_data(e) as *const f32;
-                        let data =
-                            unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec();
-                        FloatData(data)
-                    }
-                    _ => {
-                        panic!("Not supported data type!");
-                    }
-                };
-
-                InferenceOutput { data, shape }
-            })
-            .collect();
-
-        unsafe {
-            input_values.iter().for_each(|&x| {
-                (*self.api).ReleaseValue.unwrap()(x as *mut OrtValue);
-            });
-            output_values.iter().for_each(|&x| {
-                (*self.api).ReleaseValue.unwrap()(x as *mut OrtValue);
-            });
-        }
-
-        Ok(outputs)
-    }
-
-    pub fn new(model_path: &str, logging_level: OrtLoggingLevel) -> Result<Self> {
-        let api = Self::get_api()?;
-        let env = Self::create_env(api, "rust-onnx-runtime", logging_level)?;
-        let session_opts: *mut OrtSessionOptions = std::ptr::null_mut();
-        let mut session: *mut OrtSession = std::ptr::null_mut();
-        let model_path = CString::new(model_path).unwrap();
-        let session = unsafe {
-            let _ = (*api).CreateSession.context("CreateSession err")?(
-                env,
-                model_path.as_ptr(),
-                session_opts,
-                &mut session,
-            );
-            session
-        };
-        if session.is_null() {
-            bail!("Cannot create ONNX session");
-        };
-
-        Ok(ROR { api, session })
     }
 }
 
