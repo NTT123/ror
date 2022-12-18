@@ -199,7 +199,7 @@ impl ROR {
     pub fn run(
         self,
         inputs: &[NamedTensor],
-        output_names: &[String],
+        output_names: &[&str],
     ) -> Result<Vec<InferenceOutput>> {
         let input_names: Vec<CString> = inputs
             .iter()
@@ -208,7 +208,7 @@ impl ROR {
         let input_names_ptr: Vec<*const i8> = input_names.iter().map(|x| x.as_ptr()).collect();
         let c_output_names: Vec<CString> = output_names
             .iter()
-            .map(|x| CString::new(x.as_str()).unwrap())
+            .map(|&x| CString::new(x).unwrap())
             .collect();
         let c_output_names_ptr: Vec<*const i8> =
             c_output_names.iter().map(|x| x.as_ptr()).collect();
@@ -306,14 +306,15 @@ mod tests {
             OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
         )
         .unwrap();
-        let inp: [f32; 28 * 28] = [0f32; 28 * 28];
-        let shape: Vec<i64> = vec![1, 1, 28, 28];
-        let output_names: Vec<String> = vec![String::from("Plus214_Output_0")];
         for _ in 1..10 {
             let o = ror
                 .run(
-                    &[NamedTensor::from_f32_slice("Input3", &inp, &shape)],
-                    &output_names,
+                    &[NamedTensor::from_f32_slice(
+                        "Input3",
+                        &[0f32; 28 * 28],
+                        &[1, 1, 28, 28],
+                    )],
+                    &["Plus214_Output_0"],
                 )
                 .unwrap();
             assert_eq!(o[0].shape, [1, 10]);
