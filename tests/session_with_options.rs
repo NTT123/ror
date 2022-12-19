@@ -40,13 +40,13 @@ mod tests {
             0.08432205,
             -0.05454041,
         ];
-        let l1_dist = predict
+        let dist = predict
             .iter()
             .zip(target.iter())
             .map(|(&x, &y)| (x - y).abs())
             .reduce(f32::max)
             .unwrap();
-        assert!(l1_dist < 1e-8);
+        assert!(dist < 1e-8);
     }
 
     #[test]
@@ -88,12 +88,12 @@ mod tests {
             0.08432205,
             -0.05454041,
         ];
-        let l1_dist = predict
+        let dist = predict
             .iter()
             .zip(target.iter())
             .map(|(&x, &y)| (x - y).abs())
             .reduce(f32::max)
             .unwrap();
-        assert!(l1_dist < 1e-8);
+        assert!(dist < 1e-8);
     }
 }
