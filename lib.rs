@@ -2,6 +2,7 @@ extern crate ror_sys;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+pub use ror_sys::ffi::GraphOptimizationLevel;
 use ror_sys::ffi::ONNXTensorElementDataType;
 use ror_sys::ffi::OrtAllocatorType;
 use ror_sys::ffi::OrtApi;
@@ -14,7 +15,6 @@ use ror_sys::ffi::OrtTensorTypeAndShapeInfo;
 use ror_sys::ffi::ORT_API_VERSION;
 use ror_sys::ffi::{OrtMemoryInfo, OrtSession, OrtValue};
 use std::ffi::{c_void, CString};
-
 pub enum TensorData {
     FloatData(Vec<f32>),
     LongData(Vec<i32>),
@@ -119,6 +119,47 @@ impl Drop for Session {
     }
 }
 
+#[derive(Default)]
+pub struct SessionOptions {
+    inter_op_num_threads: Option<i32>,
+    intra_op_num_threads: Option<i32>,
+    graph_optimization_level: Option<ror_sys::ffi::GraphOptimizationLevel>,
+}
+
+impl SessionOptions {
+    pub fn new() -> Self {
+        SessionOptions {
+            inter_op_num_threads: None,
+            intra_op_num_threads: None,
+            graph_optimization_level: None,
+        }
+    }
+
+    pub fn set_inter_op_num_threads(&self, num_threads: i32) -> Self {
+        SessionOptions {
+            inter_op_num_threads: Some(num_threads),
+            intra_op_num_threads: self.intra_op_num_threads,
+            graph_optimization_level: self.graph_optimization_level,
+        }
+    }
+
+    pub fn set_intra_op_num_threads(&self, num_threads: i32) -> Self {
+        SessionOptions {
+            intra_op_num_threads: Some(num_threads),
+            inter_op_num_threads: self.intra_op_num_threads,
+            graph_optimization_level: self.graph_optimization_level,
+        }
+    }
+
+    pub fn set_graph_optimization_level(&self, level: GraphOptimizationLevel) -> Self {
+        SessionOptions {
+            intra_op_num_threads: self.intra_op_num_threads,
+            inter_op_num_threads: self.intra_op_num_threads,
+            graph_optimization_level: Some(level),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Env {
     raw_api_ptr: *const OrtApi,
@@ -140,11 +181,30 @@ impl Env {
         })
     }
 
-    pub fn create_session(self, model_path: &str) -> Result<Session> {
-        let session_opts: *mut OrtSessionOptions = std::ptr::null_mut();
-        let mut session_ptr: *mut OrtSession = std::ptr::null_mut();
+    pub fn create_session_with_options(
+        self,
+        model_path: &str,
+        options: SessionOptions,
+    ) -> Result<Session> {
         let model_path = CString::new(model_path).unwrap();
-        let session = unsafe {
+        let session_opts = unsafe {
+            let mut session_opts: *mut OrtSessionOptions = std::ptr::null_mut();
+            (*self.raw_api_ptr).CreateSessionOptions.unwrap()(&mut session_opts);
+            if let Some(n) = options.inter_op_num_threads {
+                (*self.raw_api_ptr).SetInterOpNumThreads.unwrap()(session_opts, n);
+            }
+            if let Some(n) = options.intra_op_num_threads {
+                (*self.raw_api_ptr).SetIntraOpNumThreads.unwrap()(session_opts, n);
+            }
+            if let Some(l) = options.graph_optimization_level {
+                (*self.raw_api_ptr)
+                    .SetSessionGraphOptimizationLevel
+                    .unwrap()(session_opts, l);
+            }
+            session_opts
+        };
+        let session_ptr = unsafe {
+            let mut session_ptr: *mut OrtSession = std::ptr::null_mut();
             let _ = (*self.raw_api_ptr)
                 .CreateSession
                 .context("CreateSession err")?(
@@ -155,7 +215,8 @@ impl Env {
             );
             session_ptr
         };
-        if session.is_null() {
+        unsafe { (*self.raw_api_ptr).ReleaseSessionOptions.unwrap()(session_opts) };
+        if session_ptr.is_null() {
             bail!("Cannot create ONNX session");
         };
 
@@ -164,6 +225,10 @@ impl Env {
             raw_session_ptr: session_ptr,
             _env: self,
         })
+    }
+
+    pub fn create_session(self, model_path: &str) -> Result<Session> {
+        self.create_session_with_options(model_path, SessionOptions::new())
     }
 }
 
