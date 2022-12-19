@@ -17,10 +17,12 @@ use ror_sys::ffi::{OrtMemoryInfo, OrtSession, OrtValue};
 use std::ffi::{c_void, CString};
 pub enum TensorData {
     FloatData(Vec<f32>),
-    LongData(Vec<i32>),
+    IntData(Vec<i32>),
+    LongData(Vec<i64>),
 }
 
 pub use TensorData::FloatData;
+pub use TensorData::IntData;
 pub use TensorData::LongData;
 
 impl TensorData {
@@ -32,6 +34,13 @@ impl TensorData {
     }
 
     pub fn into_i32_slice(&self) -> Option<&[i32]> {
+        match self {
+            IntData(v) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
+
+    pub fn into_i64_slice(&self) -> Option<&[i64]> {
         match self {
             LongData(v) => Some(v.as_slice()),
             _ => None,
@@ -77,10 +86,23 @@ impl NamedTensor {
         let mem_size: usize = num_elem * std::mem::size_of::<i32>();
         NamedTensor {
             name: String::from(name),
-            data: LongData(Vec::from(data)),
+            data: IntData(Vec::from(data)),
             shape: Vec::from(shape),
             mem_size,
             dtype: ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32,
+        }
+    }
+
+    pub fn from_i64_slice(name: &str, data: &[i64], shape: &[i64]) -> Self {
+        Self::assert_correct_shape(data, shape);
+        let num_elem = shape.iter().product::<i64>() as usize;
+        let mem_size: usize = num_elem * std::mem::size_of::<i64>();
+        NamedTensor {
+            name: String::from(name),
+            data: LongData(Vec::from(data)),
+            shape: Vec::from(shape),
+            mem_size,
+            dtype: ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
         }
     }
 }
@@ -287,6 +309,7 @@ impl Value {
         let mem_info = MemoryInfo::new(raw_api_ptr);
         let data_ptr = match &tensor.data {
             FloatData(d) => d.as_ptr() as *mut c_void,
+            IntData(d) => d.as_ptr() as *mut c_void,
             LongData(d) => d.as_ptr() as *mut c_void,
         };
         let mut ort_value: *mut OrtValue = std::ptr::null_mut();
@@ -423,6 +446,12 @@ impl Session {
                 let data = match dtype {
                     ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 => {
                         let data = e.get_tensor_mutable_data() as *const i32;
+                        let data =
+                            unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec();
+                        IntData(data)
+                    }
+                    ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 => {
+                        let data = e.get_tensor_mutable_data() as *const i64;
                         let data =
                             unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec();
                         LongData(data)
