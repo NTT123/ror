@@ -15,15 +15,6 @@ use ror_sys::ffi::ORT_API_VERSION;
 use ror_sys::ffi::{OrtMemoryInfo, OrtSession, OrtValue};
 use std::ffi::{c_void, CString};
 
-#[derive(Debug, Clone, Copy)]
-pub struct ROR {
-    api: *const OrtApi,
-    session: *const OrtSession,
-}
-
-unsafe impl Send for ROR {}
-unsafe impl Sync for ROR {}
-
 pub enum TensorData {
     FloatData(Vec<f32>),
     LongData(Vec<i32>),
@@ -94,36 +85,224 @@ impl NamedTensor {
     }
 }
 
-pub struct InferenceOutput {
-    pub data: TensorData,
-    pub shape: Vec<i64>,
+#[derive(Debug, Clone, Copy)]
+pub struct Api {
+    raw_ptr: *const OrtApi,
 }
 
-impl ROR {
-    pub fn new(model_path: &str, logging_level: OrtLoggingLevel) -> Result<Self> {
-        let api = Self::get_api()?;
-        let env = Self::create_env(api, "rust-onnx-runtime", logging_level)?;
+impl Api {
+    pub fn new() -> Result<Self> {
+        let ort_api_base = unsafe {
+            ror_sys::ffi::OrtGetApiBase()
+                .as_ref()
+                .context("Cannot get api base")?
+        };
+        let api = unsafe { ort_api_base.GetApi.context("Cannot call GetAPI")?(ORT_API_VERSION) };
+        Ok(Self { raw_ptr: api })
+    }
+
+    pub fn create_env(&self, name: &str, logging_level: OrtLoggingLevel) -> Result<Env> {
+        Env::new(&self, name, logging_level)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Session {
+    raw_api_ptr: *const OrtApi,
+    raw_session_ptr: *mut OrtSession,
+    _env: Env,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        unsafe { (*self.raw_api_ptr).ReleaseSession.unwrap()(self.raw_session_ptr) }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Env {
+    raw_api_ptr: *const OrtApi,
+    raw_env_ptr: *mut OrtEnv,
+}
+
+impl Env {
+    pub fn new(api: &Api, name: &str, logging_level: OrtLoggingLevel) -> Result<Self> {
+        let cname = CString::new(name)?;
+        let env = unsafe {
+            let create_env_fn = (*api.raw_ptr).CreateEnv.context("Cannot call CreateEnv")?;
+            let mut env: *mut OrtEnv = std::ptr::null_mut();
+            create_env_fn(logging_level, cname.as_ptr(), &mut env);
+            env
+        };
+        Ok(Env {
+            raw_api_ptr: api.raw_ptr,
+            raw_env_ptr: env,
+        })
+    }
+
+    pub fn create_session(self, model_path: &str) -> Result<Session> {
         let session_opts: *mut OrtSessionOptions = std::ptr::null_mut();
-        let mut session: *mut OrtSession = std::ptr::null_mut();
+        let mut session_ptr: *mut OrtSession = std::ptr::null_mut();
         let model_path = CString::new(model_path).unwrap();
         let session = unsafe {
-            let _ = (*api).CreateSession.context("CreateSession err")?(
-                env,
+            let _ = (*self.raw_api_ptr)
+                .CreateSession
+                .context("CreateSession err")?(
+                self.raw_env_ptr,
                 model_path.as_ptr(),
                 session_opts,
-                &mut session,
+                &mut session_ptr,
             );
-            session
+            session_ptr
         };
         if session.is_null() {
             bail!("Cannot create ONNX session");
         };
 
-        Ok(ROR { api, session })
+        Ok(Session {
+            raw_api_ptr: self.raw_api_ptr,
+            raw_session_ptr: session_ptr,
+            _env: self,
+        })
+    }
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        unsafe { (*self.raw_api_ptr).ReleaseEnv.unwrap()(self.raw_env_ptr) }
+    }
+}
+
+pub struct InferenceOutput {
+    pub data: TensorData,
+    pub shape: Vec<i64>,
+}
+
+unsafe impl Send for Session {}
+unsafe impl Sync for Session {}
+
+struct MemoryInfo {
+    raw_api_ptr: *const OrtApi,
+    raw_ptr: *mut OrtMemoryInfo,
+}
+
+impl MemoryInfo {
+    fn new(raw_api_ptr: *const OrtApi) -> Self {
+        unsafe {
+            let mut mem_info: *mut OrtMemoryInfo = std::ptr::null_mut();
+
+            (*raw_api_ptr).CreateCpuMemoryInfo.unwrap()(
+                OrtAllocatorType::OrtArenaAllocator,
+                OrtMemType::OrtMemTypeDefault,
+                &mut mem_info,
+            );
+            if mem_info.is_null() {
+                panic!("Cannot create cpu mem info");
+            }
+            Self {
+                raw_api_ptr,
+                raw_ptr: mem_info,
+            }
+        }
+    }
+}
+
+impl Drop for MemoryInfo {
+    fn drop(&mut self) {
+        unsafe { (*self.raw_api_ptr).ReleaseMemoryInfo.unwrap()(self.raw_ptr) };
+    }
+}
+struct Value {
+    raw_ptr: *mut OrtValue,
+    raw_api_ptr: *const OrtApi,
+}
+
+impl Value {
+    fn from_tensor(raw_api_ptr: *const OrtApi, tensor: &NamedTensor) -> Self {
+        let mem_info = MemoryInfo::new(raw_api_ptr);
+        let data_ptr = match &tensor.data {
+            FloatData(d) => d.as_ptr() as *mut c_void,
+            LongData(d) => d.as_ptr() as *mut c_void,
+        };
+        let mut ort_value: *mut OrtValue = std::ptr::null_mut();
+        unsafe {
+            (*raw_api_ptr).CreateTensorWithDataAsOrtValue.unwrap()(
+                mem_info.raw_ptr,
+                data_ptr,
+                tensor.mem_size,
+                tensor.shape.as_ptr(),
+                tensor.shape.len(),
+                tensor.dtype,
+                &mut ort_value,
+            );
+            if ort_value.is_null() {
+                panic!("Cannot create ort value");
+            }
+            Value {
+                raw_ptr: ort_value,
+                raw_api_ptr: raw_api_ptr,
+            }
+        }
     }
 
+    fn get_value_shape_and_dtype(&self) -> (Vec<i64>, ONNXTensorElementDataType) {
+        let mut type_and_shape_info: *mut OrtTensorTypeAndShapeInfo = std::ptr::null_mut();
+        let type_and_shape_info = unsafe {
+            (*self.raw_api_ptr).GetTensorTypeAndShape.unwrap()(
+                self.raw_ptr,
+                &mut type_and_shape_info,
+            );
+            type_and_shape_info
+        };
+
+        let dtype = unsafe {
+            let mut dtype: ONNXTensorElementDataType =
+                ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+            (*self.raw_api_ptr).GetTensorElementType.unwrap()(type_and_shape_info, &mut dtype);
+            dtype
+        };
+
+        let num_dim = unsafe {
+            let mut _num_dim = 0;
+            (*self.raw_api_ptr).GetDimensionsCount.expect("Err")(
+                type_and_shape_info,
+                &mut _num_dim,
+            );
+            _num_dim
+        };
+        let dims = unsafe {
+            let mut _dims: Vec<i64> = vec![0; num_dim];
+            (*self.raw_api_ptr).GetDimensions.unwrap()(
+                type_and_shape_info,
+                _dims.as_mut_ptr(),
+                num_dim,
+            );
+            _dims
+        };
+        unsafe {
+            (*self.raw_api_ptr).ReleaseTensorTypeAndShapeInfo.unwrap()(type_and_shape_info);
+        };
+        (dims, dtype)
+    }
+
+    fn get_tensor_mutable_data(&self) -> *const c_void {
+        unsafe {
+            let mut output: *mut c_void = std::ptr::null_mut();
+            (*self.raw_api_ptr).GetTensorMutableData.unwrap()(self.raw_ptr, &mut output);
+            output
+        }
+    }
+}
+
+impl Drop for Value {
+    fn drop(&mut self) {
+        unsafe { (*self.raw_api_ptr).ReleaseValue.unwrap()(self.raw_ptr) };
+    }
+}
+
+impl Session {
     pub fn run(
-        self,
+        &self,
         inputs: &[NamedTensor],
         output_names: &[&str],
     ) -> Result<Vec<InferenceOutput>> {
@@ -138,16 +317,22 @@ impl ROR {
             .collect();
         let c_output_names_ptr: Vec<*const i8> =
             c_output_names.iter().map(|x| x.as_ptr()).collect();
-        let input_values: Vec<*const OrtValue> =
-            inputs.iter().map(|x| self.tensor_to_ort_value(x)).collect();
-        let output_values = unsafe {
+        let input_values: Vec<Value> = inputs
+            .iter()
+            .map(|x| Value::from_tensor(self.raw_api_ptr, x))
+            .collect();
+        let input_values_ptr: Vec<*const OrtValue> = input_values
+            .iter()
+            .map(|x| x.raw_ptr as *const OrtValue)
+            .collect();
+        let output_values: Vec<Value> = unsafe {
             let mut output_values: Vec<*mut OrtValue> =
                 output_names.iter().map(|&_| std::ptr::null_mut()).collect();
-            let status = (*self.api).Run.unwrap()(
-                self.session as *mut OrtSession,
+            let status = (*self.raw_api_ptr).Run.unwrap()(
+                self.raw_session_ptr as *mut OrtSession,
                 std::ptr::null(),
                 input_names_ptr.as_ptr(),
-                input_values.as_ptr(),
+                input_values_ptr.as_ptr(),
                 inputs.len(),
                 c_output_names_ptr.as_ptr(),
                 output_names.len(),
@@ -157,22 +342,28 @@ impl ROR {
                 bail!("{}", self.get_error_message(status).unwrap());
             }
             output_values
+                .iter()
+                .map(|&x| Value {
+                    raw_ptr: x,
+                    raw_api_ptr: self.raw_api_ptr,
+                })
+                .collect()
         };
 
         let outputs: Vec<InferenceOutput> = output_values
             .iter()
-            .map(|&e| {
-                let (shape, dtype) = self.get_value_shape_and_dtype(e);
+            .map(|e| {
+                let (shape, dtype) = e.get_value_shape_and_dtype();
                 let size: i64 = shape.iter().product();
                 let data = match dtype {
                     ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 => {
-                        let data = self.get_tensor_mutable_data(e) as *const i32;
+                        let data = e.get_tensor_mutable_data() as *const i32;
                         let data =
                             unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec();
                         LongData(data)
                     }
                     ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT => {
-                        let data = self.get_tensor_mutable_data(e) as *const f32;
+                        let data = e.get_tensor_mutable_data() as *const f32;
                         let data =
                             unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec();
                         FloatData(data)
@@ -185,292 +376,16 @@ impl ROR {
                 InferenceOutput { data, shape }
             })
             .collect();
-
-        unsafe {
-            input_values.iter().for_each(|&x| {
-                (*self.api).ReleaseValue.unwrap()(x as *mut OrtValue);
-            });
-            output_values.iter().for_each(|&x| {
-                (*self.api).ReleaseValue.unwrap()(x as *mut OrtValue);
-            });
-        }
-
         Ok(outputs)
     }
 
-    fn get_api() -> Result<*const OrtApi> {
-        let ort_api_base = unsafe {
-            ror_sys::ffi::OrtGetApiBase()
-                .as_ref()
-                .context("Cannot get api base")?
-        };
-        let api = unsafe { ort_api_base.GetApi.context("Cannot call GetAPI")?(ORT_API_VERSION) };
-        Ok(api)
-    }
-
-    fn create_env(
-        api: *const OrtApi,
-        name: &str,
-        logging_level: OrtLoggingLevel,
-    ) -> Result<*mut OrtEnv> {
-        let cname = CString::new(name)?;
-        let env = unsafe {
-            let create_env_fn = (*api).CreateEnv.context("Cannot call CreateEnv")?;
-            let mut env: *mut OrtEnv = std::ptr::null_mut();
-            create_env_fn(logging_level, cname.as_ptr(), &mut env);
-            env
-        };
-        Ok(env)
-    }
-
-    fn tensor_to_ort_value(self, tensor: &NamedTensor) -> *const OrtValue {
-        let mem_info = self.create_cpu_memory_info();
-        let data_ptr = match &tensor.data {
-            FloatData(d) => d.as_ptr() as *mut c_void,
-            LongData(d) => d.as_ptr() as *mut c_void,
-        };
-        let mut ort_value: *mut OrtValue = std::ptr::null_mut();
-        unsafe {
-            (*self.api).CreateTensorWithDataAsOrtValue.unwrap()(
-                mem_info,
-                data_ptr,
-                tensor.mem_size,
-                tensor.shape.as_ptr(),
-                tensor.shape.len(),
-                tensor.dtype,
-                &mut ort_value,
-            );
-            if ort_value.is_null() {
-                panic!("Cannot create ort value");
-            }
-            (*self.api).ReleaseMemoryInfo.unwrap()(mem_info);
-            ort_value
-        }
-    }
-
-    fn create_cpu_memory_info(self) -> *mut OrtMemoryInfo {
-        unsafe {
-            let mut mem_info: *mut OrtMemoryInfo = std::ptr::null_mut();
-
-            (*self.api).CreateCpuMemoryInfo.unwrap()(
-                OrtAllocatorType::OrtArenaAllocator,
-                OrtMemType::OrtMemTypeDefault,
-                &mut mem_info,
-            );
-            if mem_info.is_null() {
-                panic!("Cannot create cpu mem info");
-            }
-            mem_info
-        }
-    }
-
-    fn get_tensor_mutable_data(self, x: *const OrtValue) -> *const c_void {
-        unsafe {
-            let mut output: *mut c_void = std::ptr::null_mut();
-            (*self.api).GetTensorMutableData.unwrap()(x as *mut OrtValue, &mut output);
-            output
-        }
-    }
-
-    fn get_value_shape_and_dtype(
-        self,
-        value: *const OrtValue,
-    ) -> (Vec<i64>, ONNXTensorElementDataType) {
-        let mut type_and_shape_info: *mut OrtTensorTypeAndShapeInfo = std::ptr::null_mut();
-        let type_and_shape_info = unsafe {
-            (*self.api).GetTensorTypeAndShape.unwrap()(value, &mut type_and_shape_info);
-            type_and_shape_info
-        };
-
-        let dtype = unsafe {
-            let mut dtype: ONNXTensorElementDataType =
-                ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
-            (*self.api).GetTensorElementType.unwrap()(type_and_shape_info, &mut dtype);
-            dtype
-        };
-
-        let num_dim = unsafe {
-            let mut _num_dim = 0;
-            (*self.api).GetDimensionsCount.expect("Err")(type_and_shape_info, &mut _num_dim);
-            _num_dim
-        };
-        let dims = unsafe {
-            let mut _dims: Vec<i64> = vec![0; num_dim];
-            (*self.api).GetDimensions.unwrap()(type_and_shape_info, _dims.as_mut_ptr(), num_dim);
-            _dims
-        };
-        unsafe {
-            (*self.api).ReleaseTensorTypeAndShapeInfo.unwrap()(type_and_shape_info);
-        };
-        (dims, dtype)
-    }
-
-    fn get_error_message(self, status: *const OrtStatus) -> Result<String> {
+    fn get_error_message(&self, status: *const OrtStatus) -> Result<String> {
         if status.is_null() {
             bail!("No error!")
         } else {
-            let msg = unsafe { (*self.api).GetErrorMessage.unwrap()(status) };
+            let msg = unsafe { (*self.raw_api_ptr).GetErrorMessage.unwrap()(status) };
             let msg = unsafe { std::ffi::CStr::from_ptr(msg).to_str() };
             msg.map(|e| e.to_string()).context("Utf8 error")
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let ror = ROR::new(
-            "models/mnist.onnx",
-            OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
-        )
-        .unwrap();
-        for _ in 1..10 {
-            let o = ror
-                .run(
-                    &[NamedTensor::from_f32_slice(
-                        "Input3",
-                        &[0f32; 28 * 28],
-                        &[1, 1, 28, 28],
-                    )],
-                    &["Plus214_Output_0"],
-                )
-                .unwrap();
-            assert_eq!(o[0].shape, [1, 10]);
-        }
-    }
-
-    #[test]
-    fn test_mnist_zero_input() {
-        let ror = ROR::new(
-            "models/mnist.onnx",
-            OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
-        )
-        .unwrap();
-        let o = ror
-            .run(
-                &[NamedTensor::from_f32_slice(
-                    "Input3",
-                    &[0f32; 28 * 28],
-                    &[1, 1, 28, 28],
-                )],
-                &["Plus214_Output_0"],
-            )
-            .unwrap();
-
-        let predict = o[0].data.into_f32_slice().unwrap();
-        let target: [f32; 10] = [
-            -0.04485603,
-            0.00779166,
-            0.06810082,
-            0.02999374,
-            -0.12640963,
-            0.14021875,
-            -0.0552849,
-            -0.04938382,
-            0.08432205,
-            -0.05454041,
-        ];
-        let l1_dist = predict
-            .iter()
-            .zip(target.iter())
-            .map(|(&x, &y)| (x - y).abs())
-            .reduce(f32::max)
-            .unwrap();
-        assert!(l1_dist < 1e-8);
-    }
-
-    #[test]
-    fn test_mnist_nonzero_input() {
-        let ror = ROR::new(
-            "models/mnist.onnx",
-            OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
-        )
-        .unwrap();
-        let o = ror
-            .run(
-                &[NamedTensor::from_f32_slice(
-                    "Input3",
-                    &[1.0f32; 28 * 28],
-                    &[1, 1, 28, 28],
-                )],
-                &["Plus214_Output_0"],
-            )
-            .unwrap();
-
-        let predict = o[0].data.into_f32_slice().unwrap();
-        let target: [f32; 10] = [
-            -1.7834078073501587,
-            -1.5465246438980103,
-            -0.6232262253761292,
-            0.8309603333473206,
-            -1.6586133241653442,
-            1.6030707359313965,
-            2.7646830081939697,
-            -3.4099056720733643,
-            1.6252055168151855,
-            -0.16226638853549957,
-        ];
-        let l1_dist = predict
-            .iter()
-            .zip(target.iter())
-            .map(|(&x, &y)| (x - y).abs())
-            .reduce(f32::max)
-            .unwrap();
-        assert!(l1_dist < 1e-6);
-    }
-
-    #[test]
-    fn test_mnist_nonzero_input_multithread() {
-        let ror = ROR::new(
-            "models/mnist.onnx",
-            OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
-        )
-        .unwrap();
-
-        let mut handles = Vec::with_capacity(1000);
-        for _ in 0..100 {
-            let handle = std::thread::spawn(move || {
-                for _ in 0..10000 {
-                    let o = ror
-                        .run(
-                            &[NamedTensor::from_f32_slice(
-                                "Input3",
-                                &[1.0f32; 28 * 28],
-                                &[1, 1, 28, 28],
-                            )],
-                            &["Plus214_Output_0"],
-                        )
-                        .unwrap();
-
-                    let predict = o[0].data.into_f32_slice().unwrap();
-                    let target: [f32; 10] = [
-                        -1.7834078073501587,
-                        -1.5465246438980103,
-                        -0.6232262253761292,
-                        0.8309603333473206,
-                        -1.6586133241653442,
-                        1.6030707359313965,
-                        2.7646830081939697,
-                        -3.4099056720733643,
-                        1.6252055168151855,
-                        -0.16226638853549957,
-                    ];
-                    let l1_dist = predict
-                        .iter()
-                        .zip(target.iter())
-                        .map(|(&x, &y)| (x - y).abs())
-                        .reduce(f32::max)
-                        .unwrap();
-                    assert!(l1_dist < 1e-6);
-                }
-            });
-            handles.push(handle);
-        }
-        for handle in handles {
-            handle.join().unwrap();
         }
     }
 }
